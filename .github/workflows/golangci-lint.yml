@@ -1,0 +1,24 @@
+name: golangci-lint
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+jobs:
+  golangci:
+    name: lint
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        working-directory:
+          - ""
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions/setup-go@v2
+        with:
+          ## golang v1.18 breaks golangci-lint <= v1.45
+          ## ref: https://github.com/golangci/golangci-lint/issues/2374#issuecomment-1069029422
+          go-version: '1.17'
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v3
+        with:
+          version: v1.44.0
+          args: --timeout 15m 
