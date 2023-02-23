@@ -115,6 +115,7 @@ const (
 	initConfiguration    = "initConfiguration"
 	joinConfiguration    = "joinConfiguration"
 	nodeRegistration     = "nodeRegistration"
+	skipPhases           = "skipPhases"
 	patches              = "patches"
 	directory            = "directory"
 	preKubeadmCommands   = "preKubeadmCommands"
@@ -126,7 +127,10 @@ const (
 	scheduler            = "scheduler"
 	ntp                  = "ntp"
 	ignition             = "ignition"
+	diskSetup            = "diskSetup"
 )
+
+const minimumCertificatesExpiryDays = 7
 
 // ValidateUpdate implements webhook.Validator so a webhook will be registered for the type.
 func (in *KubeadmControlPlane) ValidateUpdate(old runtime.Object) error {
@@ -145,8 +149,10 @@ func (in *KubeadmControlPlane) ValidateUpdate(old runtime.Object) error {
 		{spec, kubeadmConfigSpec, clusterConfiguration, scheduler, "*"},
 		{spec, kubeadmConfigSpec, initConfiguration, nodeRegistration, "*"},
 		{spec, kubeadmConfigSpec, initConfiguration, patches, directory},
+		{spec, kubeadmConfigSpec, initConfiguration, skipPhases},
 		{spec, kubeadmConfigSpec, joinConfiguration, nodeRegistration, "*"},
 		{spec, kubeadmConfigSpec, joinConfiguration, patches, directory},
+		{spec, kubeadmConfigSpec, joinConfiguration, skipPhases},
 		{spec, kubeadmConfigSpec, preKubeadmCommands},
 		{spec, kubeadmConfigSpec, postKubeadmCommands},
 		{spec, kubeadmConfigSpec, files},
@@ -154,15 +160,18 @@ func (in *KubeadmControlPlane) ValidateUpdate(old runtime.Object) error {
 		{spec, kubeadmConfigSpec, users},
 		{spec, kubeadmConfigSpec, ntp, "*"},
 		{spec, kubeadmConfigSpec, ignition, "*"},
+		{spec, kubeadmConfigSpec, diskSetup, "*"},
 		{spec, "machineTemplate", "metadata", "*"},
 		{spec, "machineTemplate", "infrastructureRef", "apiVersion"},
 		{spec, "machineTemplate", "infrastructureRef", "name"},
 		{spec, "machineTemplate", "infrastructureRef", "kind"},
 		{spec, "machineTemplate", "nodeDrainTimeout"},
+		{spec, "machineTemplate", "nodeVolumeDetachTimeout"},
 		{spec, "machineTemplate", "nodeDeletionTimeout"},
 		{spec, "replicas"},
 		{spec, "version"},
 		{spec, "rolloutAfter"},
+		{spec, "rolloutBefore", "*"},
 		{spec, "rolloutStrategy", "*"},
 	}
 
@@ -313,7 +322,24 @@ func validateKubeadmControlPlaneSpec(s KubeadmControlPlaneSpec, namespace string
 		allErrs = append(allErrs, field.Invalid(pathPrefix.Child("version"), s.Version, "must be a valid semantic version"))
 	}
 
+	allErrs = append(allErrs, validateRolloutBefore(s.RolloutBefore, pathPrefix.Child("rolloutBefore"))...)
 	allErrs = append(allErrs, validateRolloutStrategy(s.RolloutStrategy, s.Replicas, pathPrefix.Child("rolloutStrategy"))...)
+
+	return allErrs
+}
+
+func validateRolloutBefore(rolloutBefore *RolloutBefore, pathPrefix *field.Path) field.ErrorList {
+	allErrs := field.ErrorList{}
+
+	if rolloutBefore == nil {
+		return allErrs
+	}
+
+	if rolloutBefore.CertificatesExpiryDays != nil {
+		if *rolloutBefore.CertificatesExpiryDays < minimumCertificatesExpiryDays {
+			allErrs = append(allErrs, field.Invalid(pathPrefix.Child("certificatesExpiryDays"), *rolloutBefore.CertificatesExpiryDays, fmt.Sprintf("must be greater than or equal to %v", minimumCertificatesExpiryDays)))
+		}
+	}
 
 	return allErrs
 }
@@ -338,7 +364,7 @@ func validateRolloutStrategy(rolloutStrategy *RolloutStrategy, replicas *int32, 
 	ios1 := intstr.FromInt(1)
 	ios0 := intstr.FromInt(0)
 
-	if *rolloutStrategy.RollingUpdate.MaxSurge == ios0 && (replicas != nil && *replicas < int32(3)) {
+	if rolloutStrategy.RollingUpdate.MaxSurge.IntValue() == ios0.IntValue() && (replicas != nil && *replicas < int32(3)) {
 		allErrs = append(
 			allErrs,
 			field.Required(
@@ -348,7 +374,7 @@ func validateRolloutStrategy(rolloutStrategy *RolloutStrategy, replicas *int32, 
 		)
 	}
 
-	if *rolloutStrategy.RollingUpdate.MaxSurge != ios1 && *rolloutStrategy.RollingUpdate.MaxSurge != ios0 {
+	if rolloutStrategy.RollingUpdate.MaxSurge.IntValue() != ios1.IntValue() && rolloutStrategy.RollingUpdate.MaxSurge.IntValue() != ios0.IntValue() {
 		allErrs = append(
 			allErrs,
 			field.Required(

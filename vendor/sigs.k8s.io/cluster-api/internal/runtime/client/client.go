@@ -142,7 +142,9 @@ func (c *client) Discover(ctx context.Context, extensionConfig *runtimev1.Extens
 
 	// Check to see if the response is a failure and handle the failure accordingly.
 	if response.GetStatus() == runtimehooksv1.ResponseStatusFailure {
-		return nil, errors.Errorf("failed to discover extension %q: got failure response with message %q", extensionConfig.Name, response.GetMessage())
+		log.Info(fmt.Sprintf("failed to discover extension %q: got failure response with message %v", extensionConfig.Name, response.GetMessage()))
+		// Don't add the message to the error as it is may be unique causing too many reconciliations. Ref: https://github.com/kubernetes-sigs/cluster-api/issues/6921
+		return nil, errors.Errorf("failed to discover extension %q: got failure response", extensionConfig.Name)
 	}
 
 	// Check to see if the response is valid.
@@ -252,25 +254,25 @@ func (c *client) CallAllExtensions(ctx context.Context, hook runtimecatalog.Hook
 
 // aggregateSuccessfulResponses aggregates all successful responses into a single response.
 func aggregateSuccessfulResponses(aggregatedResponse runtimehooksv1.ResponseObject, responses []runtimehooksv1.ResponseObject) {
-	// At this point the Status should always be ResponseStatusSuccess and the Message should be empty.
-	// So let's set those values to avoid keeping values that could have been set by the caller of CallAllExtensions.
-	aggregatedResponse.SetMessage("")
+	// At this point the Status should always be ResponseStatusSuccess.
 	aggregatedResponse.SetStatus(runtimehooksv1.ResponseStatusSuccess)
 
-	aggregatedRetryResponse, ok := aggregatedResponse.(runtimehooksv1.RetryResponseObject)
-	if !ok {
-		// If the aggregated response is not a RetryResponseObject then we're done.
-		return
-	}
 	// Note: As all responses have the same type we can assume now that
 	// they all implement the RetryResponseObject interface.
-
+	messages := []string{}
 	for _, resp := range responses {
-		aggregatedRetryResponse.SetRetryAfterSeconds(lowestNonZeroRetryAfterSeconds(
-			aggregatedRetryResponse.GetRetryAfterSeconds(),
-			resp.(runtimehooksv1.RetryResponseObject).GetRetryAfterSeconds(),
-		))
+		aggregatedRetryResponse, ok := aggregatedResponse.(runtimehooksv1.RetryResponseObject)
+		if ok {
+			aggregatedRetryResponse.SetRetryAfterSeconds(lowestNonZeroRetryAfterSeconds(
+				aggregatedRetryResponse.GetRetryAfterSeconds(),
+				resp.(runtimehooksv1.RetryResponseObject).GetRetryAfterSeconds(),
+			))
+		}
+		if resp.GetMessage() != "" {
+			messages = append(messages, resp.GetMessage())
+		}
 	}
+	aggregatedResponse.SetMessage(strings.Join(messages, ", "))
 }
 
 // lowestNonZeroRetryAfterSeconds returns the lowest non-zero value of the two provided values.
@@ -334,7 +336,7 @@ func (c *client) CallExtension(ctx context.Context, hook runtimecatalog.Hook, fo
 	}
 
 	log.Info(fmt.Sprintf("Calling extension handler %q", name))
-	var timeoutDuration time.Duration
+	timeoutDuration := runtimehooksv1.DefaultHandlersTimeoutSeconds * time.Second
 	if registration.TimeoutSeconds != nil {
 		timeoutDuration = time.Duration(*registration.TimeoutSeconds) * time.Second
 	}
@@ -364,8 +366,9 @@ func (c *client) CallExtension(ctx context.Context, hook runtimecatalog.Hook, fo
 
 	// If the received response is a failure then return an error.
 	if response.GetStatus() == runtimehooksv1.ResponseStatusFailure {
-		log.Error(err, "extension handler returned a failure response")
-		return errors.Errorf("failed to call extension handler %q: got failure response with message %q", name, response.GetMessage())
+		log.Info(fmt.Sprintf("failed to call extension handler %q: got failure response with message %v", name, response.GetMessage()))
+		// Don't add the message to the error as it is may be unique causing too many reconciliations. Ref: https://github.com/kubernetes-sigs/cluster-api/issues/6921
+		return errors.Errorf("failed to call extension handler %q: got failure response", name)
 	}
 
 	if retryResponse, ok := response.(runtimehooksv1.RetryResponseObject); ok && retryResponse.GetRetryAfterSeconds() != 0 {
@@ -616,7 +619,7 @@ func defaultDiscoveryResponse(discovery *runtimehooksv1.DiscoveryResponse) *runt
 
 		// If TimeoutSeconds is not defined set to 10.
 		if handler.TimeoutSeconds == nil {
-			handler.TimeoutSeconds = pointer.Int32(10)
+			handler.TimeoutSeconds = pointer.Int32(runtimehooksv1.DefaultHandlersTimeoutSeconds)
 		}
 
 		discovery.Handlers[i] = handler
