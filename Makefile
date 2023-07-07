@@ -40,6 +40,7 @@ CURL_RETRIES=3
 
 # Directories
 TOOLS_DIR := $(ROOT)/hack/tools
+CHART_UPDATE_DIR := $(ROOT)/hack/chart-update
 TOOLS_BIN_DIR := $(TOOLS_DIR)/bin
 JUNIT_REPORT_DIR := $(TOOLS_DIR)/_out
 BIN_DIR := bin
@@ -48,7 +49,7 @@ GO_INSTALL := ./scripts/go_install.sh
 export PATH := $(abspath $(TOOLS_BIN_DIR)):$(PATH)
 
 # Kubebuilder
-export KUBEBUILDER_ENVTEST_KUBERNETES_VERSION ?= 1.24.2
+export KUBEBUILDER_ENVTEST_KUBERNETES_VERSION ?= 1.26.1
 export KUBEBUILDER_CONTROLPLANE_START_TIMEOUT ?= 60s
 export KUBEBUILDER_CONTROLPLANE_STOP_TIMEOUT ?= 60s
 
@@ -61,15 +62,15 @@ IMAGE_REVIEWERS ?= $(shell ./hack/get-project-maintainers.sh)
 
 # Binaries.
 # Need to use abspath so we can invoke these from subdirectories
-CONTROLLER_GEN_VER := v0.9.2
+CONTROLLER_GEN_VER := v0.11.4
 CONTROLLER_GEN_BIN := controller-gen
 CONTROLLER_GEN := $(TOOLS_BIN_DIR)/$(CONTROLLER_GEN_BIN)-$(CONTROLLER_GEN_VER)
 
-GOLANGCI_LINT_VER := v1.51.2
+GOLANGCI_LINT_VER := v1.53.2
 GOLANGCI_LINT_BIN := golangci-lint
 GOLANGCI_LINT := $(TOOLS_BIN_DIR)/$(GOLANGCI_LINT_BIN)-$(GOLANGCI_LINT_VER)
 
-KUSTOMIZE_VER := v4.5.2
+KUSTOMIZE_VER := v5.0.1
 KUSTOMIZE_BIN := kustomize
 KUSTOMIZE := $(TOOLS_BIN_DIR)/$(KUSTOMIZE_BIN)-$(KUSTOMIZE_VER)
 
@@ -81,7 +82,7 @@ GOTESTSUM_VER := v1.6.4
 GOTESTSUM_BIN := gotestsum
 GOTESTSUM := $(TOOLS_BIN_DIR)/$(GOTESTSUM_BIN)-$(GOTESTSUM_VER)
 
-GINKGO_VER := v2.9.0
+GINKGO_VER := v2.9.7
 GINKGO_BIN := ginkgo
 GINKGO := $(TOOLS_BIN_DIR)/$(GINKGO_BIN)-$(GINKGO_VER)
 
@@ -100,6 +101,10 @@ HELM := $(TOOLS_BIN_DIR)/$(HELM_BIN)-$(HELM_VER)
 YQ_VER := v4.25.2
 YQ_BIN := yq
 YQ := $(TOOLS_BIN_DIR)/$(YQ_BIN)-$(YQ_VER)
+
+KPROMO_VER := v3.5.1
+KPROMO_BIN := kpromo
+KPROMO :=  $(TOOLS_BIN_DIR)/$(KPROMO_BIN)-$(KPROMO_VER)
 
 # It is set by Prow GIT_TAG, a git-based tag of the form vYYYYMMDD-hash, e.g., v20210120-v0.3.10-308-gc61521971
 TAG ?= dev
@@ -129,6 +134,8 @@ E2E_CONF_FILE ?= $(ROOT)/test/e2e/config/operator-dev.yaml
 E2E_CONF_FILE_ENVSUBST ?= $(ROOT)/test/e2e/config/operator-dev-envsubst.yaml
 SKIP_CLEANUP ?= false
 SKIP_CREATE_MGMT_CLUSTER ?= false
+E2E_CERT_MANAGER_VERSION ?= v1.11.1
+E2E_OPERATOR_IMAGE ?= $(CONTROLLER_IMG):$(TAG)
 
 # Relase
 RELEASE_TAG ?= $(shell git describe --abbrev=0 2>/dev/null)
@@ -157,9 +164,10 @@ golangci-lint: $(GOLANGCI_LINT) ## Build a local copy of golang ci-lint.
 gotestsum: $(GOTESTSUM) ## Build a local copy of gotestsum.
 helm: $(HELM) ## Build a local copy of helm.
 yq: $(YQ) ## Build a local copy of yq.
+kpromo: $(KPROMO) ## Build a local copy of kpromo.
 
 $(KUSTOMIZE): ## Build kustomize from tools folder.
-	GOBIN=$(TOOLS_BIN_DIR) $(GO_INSTALL) sigs.k8s.io/kustomize/kustomize/v4 $(KUSTOMIZE_BIN) $(KUSTOMIZE_VER)
+	CGO_ENABLED=0 GOBIN=$(TOOLS_BIN_DIR) $(GO_INSTALL) sigs.k8s.io/kustomize/kustomize/v5 $(KUSTOMIZE_BIN) $(KUSTOMIZE_VER)
 
 $(GO_APIDIFF): ## Build go-apidiff from tools folder.
 	GOBIN=$(TOOLS_BIN_DIR) $(GO_INSTALL) github.com/joelanford/go-apidiff $(GO_APIDIFF_BIN) $(GO_APIDIFF_VER)
@@ -194,6 +202,9 @@ $(HELM): ## Put helm into tools folder.
 $(YQ):
 	GOBIN=$(TOOLS_BIN_DIR) $(GO_INSTALL) github.com/mikefarah/yq/v4 $(YQ_BIN) ${YQ_VER}
 
+$(KPROMO):
+	GOBIN=$(TOOLS_BIN_DIR) $(GO_INSTALL) sigs.k8s.io/promo-tools/v3/cmd/kpromo $(KPROMO_BIN) ${KPROMO_VER}
+
 .PHONY: cert-mananger
 cert-manager: # Install cert-manager on the cluster. This is used for development purposes only.
 	$(ROOT)/hack/cert-manager.sh
@@ -226,7 +237,7 @@ test-junit: $(SETUP_ENVTEST) $(GOTESTSUM) ## Run tests with verbose setting and 
 
 .PHONY: operator
 operator: ## Build operator binary
-	go build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/operator sigs.k8s.io/cluster-api-operator
+	go build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/operator cmd/main.go
 
 ## --------------------------------------
 ## Lint / Verify
@@ -234,7 +245,7 @@ operator: ## Build operator binary
 
 .PHONY: lint
 lint: $(GOLANGCI_LINT) ## Lint the codebase
-	$(GOLANGCI_LINT) run -v $(GOLANGCI_LINT_EXTRA_ARGS)
+	$(GOLANGCI_LINT) run -v $(GOLANGCI_LINT_EXTRA_ARGS) --timeout=10m
 
 .PHONY: lint-fix
 lint-fix: $(GOLANGCI_LINT) ## Lint the codebase and run auto-fixers if supported by the linter
@@ -251,7 +262,7 @@ verify:
 
 .PHONY: verify-modules
 verify-modules: modules
-	@if !(git diff --quiet HEAD -- go.sum go.mod $(TOOLS_DIR)/go.mod $(TOOLS_DIR)/go.sum); then \
+	@if !(git diff --quiet HEAD -- go.sum go.mod $(TOOLS_DIR)/go.mod $(TOOLS_DIR)/go.sum $(CHART_UPDATE_DIR)/go.mod $(CHART_UPDATE_DIR)/go.sum); then \
 		git diff; \
 		echo "go module files are out of date"; exit 1; \
 	fi
@@ -275,15 +286,15 @@ generate: $(CONTROLLER_GEN) ## Generate code
 .PHONY: generate-go
 generate-go: $(CONTROLLER_GEN) ## Runs Go related generate targets for the operator
 	$(CONTROLLER_GEN) \
-		object:headerFile=$(ROOT)/hack/boilerplate/boilerplate.generatego.txt \
+		object:headerFile=$(ROOT)/hack/boilerplate.go.txt \
 		paths=./api/...
 
 .PHONY: generate-manifests
 generate-manifests: $(CONTROLLER_GEN) ## Generate manifests for the operator e.g. CRD, RBAC etc.
 	$(CONTROLLER_GEN) \
 		paths=./api/... \
-		paths=./controllers/... \
-		paths=./webhook/... \
+		paths=./internal/controller/... \
+		paths=./internal/webhook/... \
 		crd:crdVersions=v1 \
 		rbac:roleName=manager-role \
 		output:crd:dir=./config/crd/bases \
@@ -295,6 +306,7 @@ generate-manifests: $(CONTROLLER_GEN) ## Generate manifests for the operator e.g
 modules: ## Runs go mod to ensure modules are up to date.
 	go mod tidy
 	cd $(TOOLS_DIR); go mod tidy
+	cd $(CHART_UPDATE_DIR); go mod tidy
 
 ## --------------------------------------
 ## Docker
@@ -302,7 +314,7 @@ modules: ## Runs go mod to ensure modules are up to date.
 
 .PHONY: docker-pull-prerequisites
 docker-pull-prerequisites:
-	docker pull docker.io/docker/dockerfile:1.1-experimental
+	docker pull docker.io/docker/dockerfile:1.4
 	docker pull docker.io/library/golang:1.19.0
 	docker pull gcr.io/distroless/static:latest
 
@@ -345,7 +357,7 @@ docker-push-%:
 
 .PHONY: docker-build-e2e
 docker-build-e2e:
-	$(MAKE) CONTROLLER_IMG_TAG="gcr.io/k8s-staging-capi-operator/cluster-api-operator:dev" docker-build
+	$(MAKE) CONTROLLER_IMG_TAG="$(E2E_OPERATOR_IMAGE)" docker-build
 
 .PHONY: set-manifest-pull-policy
 set-manifest-pull-policy:
@@ -449,14 +461,14 @@ clean-release: ## Remove the release folder
 ## E2E
 ## --------------------------------------
 
-.PHONY: e2e-test
+.PHONY: test-e2e
 test-e2e: $(KUSTOMIZE)
 	$(MAKE) release-manifests
 	$(MAKE) test-e2e-run
 
 .PHONY: test-e2e-run
 test-e2e-run: $(GINKGO) $(ENVSUBST) ## Run e2e tests
-	$(ENVSUBST) < $(E2E_CONF_FILE) > $(E2E_CONF_FILE_ENVSUBST) && \
+	E2E_OPERATOR_IMAGE=$(E2E_OPERATOR_IMAGE) E2E_CERT_MANAGER_VERSION=$(E2E_CERT_MANAGER_VERSION) $(ENVSUBST) < $(E2E_CONF_FILE) > $(E2E_CONF_FILE_ENVSUBST) && \
 	$(GINKGO) -v -trace -tags=e2e --junit-report=junit_cluster_api_operator_e2e.xml --output-dir="${JUNIT_REPORT_DIR}" --no-color=$(GINKGO_NOCOLOR) $(GINKGO_ARGS) ./test/e2e -- \
 		-e2e.artifacts-folder="$(ARTIFACTS)" \
 		-e2e.config="$(E2E_CONF_FILE_ENVSUBST)"  -e2e.components=$(ROOT)/$(RELEASE_DIR)/operator-components.yaml \
