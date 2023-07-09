@@ -19,9 +19,8 @@ package v1alpha1
 import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	ctrlconfigv1 "sigs.k8s.io/controller-runtime/pkg/config/v1alpha1"
-
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
+	ctrlconfigv1 "sigs.k8s.io/controller-runtime/pkg/config/v1alpha1"
 )
 
 const (
@@ -51,6 +50,10 @@ type ProviderSpec struct {
 	// the same namespace as the provider.
 	// +optional
 	SecretName string `json:"secretName,omitempty"`
+
+	// SecretNamespace is the namespace of the Secret providing the configuration variables. If not specified,
+	// the namespace of the provider will be used.
+	SecretNamespace string `json:"secretNamespace,omitempty"`
 
 	// FetchConfig determines how the operator will fetch the components and metadata for the provider.
 	// If nil, the operator will try to fetch components according to default
@@ -115,6 +118,14 @@ type DeploymentSpec struct {
 	// List of containers specified in the Deployment
 	// +optional
 	Containers []ContainerSpec `json:"containers"`
+
+	// If specified, the pod's service account
+	// +optional
+	ServiceAccountName string `json:"serviceAccountName,omitempty"`
+
+	// List of image pull secrets specified in the Deployment
+	// +optional
+	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
 }
 
 // ContainerSpec defines the properties available to override for each
