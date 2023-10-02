@@ -23,6 +23,9 @@ ROOT:=$(shell dirname $(realpath $(firstword $(MAKEFILE_LIST))))
 
 .DEFAULT_GOAL:=help
 
+GO_VERSION ?= 1.20.4
+GO_CONTAINER_IMAGE ?= docker.io/library/golang:$(GO_VERSION)
+
 # Use GOPROXY environment variable if set
 GOPROXY := $(shell go env GOPROXY)
 ifeq ($(GOPROXY),)
@@ -40,6 +43,7 @@ CURL_RETRIES=3
 
 # Directories
 TOOLS_DIR := $(ROOT)/hack/tools
+TEST_DIR := $(ROOT)/test
 CHART_UPDATE_DIR := $(ROOT)/hack/chart-update
 TOOLS_BIN_DIR := $(TOOLS_DIR)/bin
 JUNIT_REPORT_DIR := $(TOOLS_DIR)/_out
@@ -82,7 +86,7 @@ GOTESTSUM_VER := v1.6.4
 GOTESTSUM_BIN := gotestsum
 GOTESTSUM := $(TOOLS_BIN_DIR)/$(GOTESTSUM_BIN)-$(GOTESTSUM_VER)
 
-GINKGO_VER := v2.9.7
+GINKGO_VER := v2.12.0
 GINKGO_BIN := ginkgo
 GINKGO := $(TOOLS_BIN_DIR)/$(GINKGO_BIN)-$(GINKGO_VER)
 
@@ -106,6 +110,14 @@ KPROMO_VER := v3.5.1
 KPROMO_BIN := kpromo
 KPROMO :=  $(TOOLS_BIN_DIR)/$(KPROMO_BIN)-$(KPROMO_VER)
 
+CONVERSION_GEN_VER := v0.27.3
+CONVERSION_GEN_BIN := conversion-gen
+CONVERSION_GEN := $(TOOLS_BIN_DIR)/$(CONVERSION_GEN_BIN)-$(CONVERSION_GEN_VER)
+
+CONVERSION_VERIFIER_VER := v1.5.0
+CONVERSION_VERIFIER_BIN := conversion-verifier
+CONVERSION_VERIFIER := $(TOOLS_BIN_DIR)/$(CONVERSION_VERIFIER_BIN)-$(CONVERSION_VERIFIER_VER)
+
 # It is set by Prow GIT_TAG, a git-based tag of the form vYYYYMMDD-hash, e.g., v20210120-v0.3.10-308-gc61521971
 TAG ?= dev
 ARCH ?= amd64
@@ -120,11 +132,15 @@ PROD_REGISTRY ?= registry.k8s.io/capi-operator
 
 # Image name
 IMAGE_NAME ?= cluster-api-operator
+PACKAGE_NAME = cluster-api-operator
 CONTROLLER_IMG ?= $(REGISTRY)/$(IMAGE_NAME)
 CONTROLLER_IMG_TAG ?= $(CONTROLLER_IMG)-$(ARCH):$(TAG)
 
 # Set build time variables including version details
 LDFLAGS := $(shell $(ROOT)/hack/version.sh)
+
+# Default cert-manager version
+CERT_MANAGER_VERSION ?= v1.12.2
 
 # E2E configuration
 GINKGO_NOCOLOR ?= false
@@ -134,16 +150,24 @@ E2E_CONF_FILE ?= $(ROOT)/test/e2e/config/operator-dev.yaml
 E2E_CONF_FILE_ENVSUBST ?= $(ROOT)/test/e2e/config/operator-dev-envsubst.yaml
 SKIP_CLEANUP ?= false
 SKIP_CREATE_MGMT_CLUSTER ?= false
-E2E_CERT_MANAGER_VERSION ?= v1.11.1
+E2E_CERT_MANAGER_VERSION ?= $(CERT_MANAGER_VERSION)
 E2E_OPERATOR_IMAGE ?= $(CONTROLLER_IMG):$(TAG)
 
 # Relase
 RELEASE_TAG ?= $(shell git describe --abbrev=0 2>/dev/null)
 HELM_CHART_TAG := $(shell echo $(RELEASE_TAG) | cut -c 2-)
 RELEASE_ALIAS_TAG ?= $(PULL_BASE_REF)
-RELEASE_DIR := out
+RELEASE_DIR := $(ROOT)/out
 CHART_DIR := $(RELEASE_DIR)/charts/cluster-api-operator
 CHART_PACKAGE_DIR := $(RELEASE_DIR)/package
+
+# Set --output-base for conversion-gen if we are not within GOPATH
+ROOT_DIR_RELATIVE := .
+ifneq ($(abspath $(ROOT_DIR_RELATIVE)),$(shell go env GOPATH)/src/sigs.k8s.io/cluster-api-operator)
+	CONVERSION_GEN_OUTPUT_BASE := --output-base=$(ROOT_DIR_RELATIVE)
+else
+	export GOPATH := $(shell go env GOPATH)
+endif
 
 all: generate test operator
 
@@ -165,6 +189,8 @@ gotestsum: $(GOTESTSUM) ## Build a local copy of gotestsum.
 helm: $(HELM) ## Build a local copy of helm.
 yq: $(YQ) ## Build a local copy of yq.
 kpromo: $(KPROMO) ## Build a local copy of kpromo.
+conversion-gen: $(CONVERSION_GEN) ## Build a local copy of conversion-gen.
+conversion-verifier: $(CONVERSION_VERIFIER) ## Build a local copy of conversion-verifier.
 
 $(KUSTOMIZE): ## Build kustomize from tools folder.
 	CGO_ENABLED=0 GOBIN=$(TOOLS_BIN_DIR) $(GO_INSTALL) sigs.k8s.io/kustomize/kustomize/v5 $(KUSTOMIZE_BIN) $(KUSTOMIZE_VER)
@@ -205,6 +231,12 @@ $(YQ):
 $(KPROMO):
 	GOBIN=$(TOOLS_BIN_DIR) $(GO_INSTALL) sigs.k8s.io/promo-tools/v3/cmd/kpromo $(KPROMO_BIN) ${KPROMO_VER}
 
+$(CONVERSION_GEN):
+	GOBIN=$(TOOLS_BIN_DIR) $(GO_INSTALL) k8s.io/code-generator/cmd/conversion-gen $(CONVERSION_GEN_BIN) ${CONVERSION_GEN_VER}
+
+$(CONVERSION_VERIFIER):
+	cd hack/tools/; GOBIN=$(TOOLS_BIN_DIR) go build -tags=tools -o $@ sigs.k8s.io/cluster-api/hack/tools/conversion-verifier
+
 .PHONY: cert-mananger
 cert-manager: # Install cert-manager on the cluster. This is used for development purposes only.
 	$(ROOT)/hack/cert-manager.sh
@@ -239,6 +271,10 @@ test-junit: $(SETUP_ENVTEST) $(GOTESTSUM) ## Run tests with verbose setting and 
 operator: ## Build operator binary
 	go build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/operator cmd/main.go
 
+.PHONY: plugin
+plugin: ## Build plugin binary
+	go build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/clusterctl-operator cmd/plugin/main.go
+
 ## --------------------------------------
 ## Lint / Verify
 ## --------------------------------------
@@ -246,6 +282,7 @@ operator: ## Build operator binary
 .PHONY: lint
 lint: $(GOLANGCI_LINT) ## Lint the codebase
 	$(GOLANGCI_LINT) run -v $(GOLANGCI_LINT_EXTRA_ARGS) --timeout=10m
+	cd $(TEST_DIR); $(GOLANGCI_LINT) run --path-prefix $(TEST_DIR) -v $(GOLANGCI_LINT_EXTRA_ARGS) --timeout=10m
 
 .PHONY: lint-fix
 lint-fix: $(GOLANGCI_LINT) ## Lint the codebase and run auto-fixers if supported by the linter
@@ -262,7 +299,7 @@ verify:
 
 .PHONY: verify-modules
 verify-modules: modules
-	@if !(git diff --quiet HEAD -- go.sum go.mod $(TOOLS_DIR)/go.mod $(TOOLS_DIR)/go.sum $(CHART_UPDATE_DIR)/go.mod $(CHART_UPDATE_DIR)/go.sum); then \
+	@if !(git diff --quiet HEAD -- go.sum go.mod $(TOOLS_DIR)/go.mod $(TOOLS_DIR)/go.sum $(CHART_UPDATE_DIR)/go.mod $(CHART_UPDATE_DIR)/go.sum $(TEST_DIR)/go.mod $(TEST_DIR)/go.sum); then \
 		git diff; \
 		echo "go module files are out of date"; exit 1; \
 	fi
@@ -279,9 +316,11 @@ verify-gen: generate
 ## --------------------------------------
 
 .PHONY: generate
-generate: $(CONTROLLER_GEN) ## Generate code
+generate: $(CONTROLLER_GEN) $(HELM) release-chart ## Generate code
 	$(MAKE) generate-manifests
 	$(MAKE) generate-go
+	$(MAKE) generate-go-conversions
+	$(HELM) template capi-operator $(CHART_PACKAGE_DIR)/$(PACKAGE_NAME)-$(HELM_CHART_TAG).tgz > test/e2e/resources/full-chart-install.yaml
 
 .PHONY: generate-go
 generate-go: $(CONTROLLER_GEN) ## Runs Go related generate targets for the operator
@@ -302,11 +341,21 @@ generate-manifests: $(CONTROLLER_GEN) ## Generate manifests for the operator e.g
 		output:webhook:dir=./config/webhook \
 		webhook
 
+.PHONY: generate-go-conversions
+generate-go-conversions: $(CONVERSION_GEN) ## Generate conversions go code
+	$(MAKE) clean-generated-conversions SRC_DIRS="./api/v1alpha1"
+	$(CONVERSION_GEN) \
+		--input-dirs=./api/v1alpha1 \
+		--build-tag=ignore_autogenerated_core \
+		--output-file-base=zz_generated.conversion $(CONVERSION_GEN_OUTPUT_BASE) \
+		--go-header-file=$(ROOT)/hack/boilerplate.go.txt
+
 .PHONY: modules
 modules: ## Runs go mod to ensure modules are up to date.
 	go mod tidy
 	cd $(TOOLS_DIR); go mod tidy
 	cd $(CHART_UPDATE_DIR); go mod tidy
+	cd $(TEST_DIR); go mod tidy
 
 ## --------------------------------------
 ## Docker
@@ -315,12 +364,12 @@ modules: ## Runs go mod to ensure modules are up to date.
 .PHONY: docker-pull-prerequisites
 docker-pull-prerequisites:
 	docker pull docker.io/docker/dockerfile:1.4
-	docker pull docker.io/library/golang:1.19.0
+	docker pull $(GO_CONTAINER_IMAGE)
 	docker pull gcr.io/distroless/static:latest
 
 .PHONY: docker-build
 docker-build: docker-pull-prerequisites ## Build the docker image for controller-manager
-	docker build --build-arg goproxy=$(GOPROXY) --build-arg ARCH=$(ARCH) --build-arg LDFLAGS="$(LDFLAGS)" . -t $(CONTROLLER_IMG_TAG)
+	docker build --build-arg builder_image=$(GO_CONTAINER_IMAGE) --build-arg goproxy=$(GOPROXY) --build-arg ARCH=$(ARCH) --build-arg LDFLAGS="$(LDFLAGS)" . -t $(CONTROLLER_IMG_TAG)
 
 .PHONY: docker-push
 docker-push: ## Push the docker image
@@ -364,10 +413,21 @@ set-manifest-pull-policy:
 	$(info Updating kustomize pull policy file for manager resources)
 	sed -i'' -e 's@imagePullPolicy: .*@imagePullPolicy: '"$(PULL_POLICY)"'@' $(TARGET_RESOURCE)
 
+.PHONY: set-manifest-pull-policy-chart
+set-manifest-pull-policy-chart: $(YQ)
+	$(info Updating image pull policy value for helm chart)
+	$(YQ) eval '.image.manager.pullPolicy = "$(PULL_POLICY)"' $(TARGET_RESOURCE) -i
+
 .PHONY: set-manifest-image
 set-manifest-image:
 	$(info Updating kustomize image patch file for manager resource)
 	sed -i'' -e 's@image: .*@image: '"${MANIFEST_IMG}:$(MANIFEST_TAG)"'@' $(TARGET_RESOURCE)
+
+.PHONY: set-manifest-image-chart
+set-manifest-image-chart: $(YQ)
+	$(info Updating image URL and tag values for helm chart)
+	$(YQ) eval '.image.manager.repository = "$(MANIFEST_IMG)"' $(TARGET_RESOURCE) -i
+	$(YQ) eval '.image.manager.tag = "$(MANIFEST_TAG)"' $(TARGET_RESOURCE) -i
 
 ## --------------------------------------
 ## Release
@@ -402,18 +462,20 @@ manifest-modification: # Set the manifest images to the staging/production bucke
 
 .PHONY: chart-manifest-modification
 chart-manifest-modification: # Set the manifest images to the staging/production bucket.
-	$(MAKE) set-manifest-image \
+	$(MAKE) set-manifest-image-chart \
 		MANIFEST_IMG=$(REGISTRY)/$(IMAGE_NAME) MANIFEST_TAG=$(RELEASE_TAG) \
-		TARGET_RESOURCE="./config/chart/manager_image_patch.yaml"
-	$(MAKE) set-manifest-pull-policy PULL_POLICY=IfNotPresent TARGET_RESOURCE="./config/chart/manager_pull_policy.yaml"
+		TARGET_RESOURCE="$(ROOT)/hack/charts/cluster-api-operator/values.yaml"
+	$(MAKE) set-manifest-pull-policy-chart PULL_POLICY=IfNotPresent TARGET_RESOURCE="$(ROOT)/hack/charts/cluster-api-operator/values.yaml"
 
 .PHONY: release-manifests
 release-manifests: $(KUSTOMIZE) $(RELEASE_DIR) ## Builds the manifests to publish with a release
 	$(KUSTOMIZE) build ./config/default > $(RELEASE_DIR)/operator-components.yaml
 
+.PHONY: release-chart
 release-chart: $(HELM) $(KUSTOMIZE) $(RELEASE_DIR) $(CHART_DIR) $(CHART_PACKAGE_DIR) ## Builds the chart to publish with a release
+	cp -rf $(ROOT)/hack/charts/cluster-api-operator/. $(CHART_DIR)
 	$(KUSTOMIZE) build ./config/chart > $(CHART_DIR)/templates/operator-components.yaml
-	cp -rf $(ROOT)/hack/chart/. $(CHART_DIR)
+	$(ROOT)/hack/inject-cert-manager-helm.sh $(CERT_MANAGER_VERSION)
 	$(HELM) package $(CHART_DIR) --app-version=$(HELM_CHART_TAG) --version=$(HELM_CHART_TAG) --destination=$(CHART_PACKAGE_DIR)
 
 .PHONY: release-staging
@@ -444,6 +506,14 @@ promote-images: $(KPROMO)
 ## Cleanup / Verification
 ## --------------------------------------
 
+.PHONY: verify-conversions
+verify-conversions: $(CONVERSION_VERIFIER) ## Verifies expected API conversion are in place
+	$(CONVERSION_VERIFIER)
+
+.PHONY: clean-generated-conversions
+clean-generated-conversions: ## Remove files generated by conversion-gen from the mentioned dirs
+	(IFS=','; for i in $(SRC_DIRS); do find $$i -type f -name 'zz_generated.conversion*' -exec rm -f {} \;; done)
+
 .PHONY: clean
 clean: ## Remove all generated files
 	$(MAKE) clean-bin
@@ -464,12 +534,14 @@ clean-release: ## Remove the release folder
 .PHONY: test-e2e
 test-e2e: $(KUSTOMIZE)
 	$(MAKE) release-manifests
+	$(MAKE) release-chart
 	$(MAKE) test-e2e-run
 
 .PHONY: test-e2e-run
-test-e2e-run: $(GINKGO) $(ENVSUBST) ## Run e2e tests
+test-e2e-run: $(GINKGO) $(ENVSUBST) $(HELM) ## Run e2e tests
 	E2E_OPERATOR_IMAGE=$(E2E_OPERATOR_IMAGE) E2E_CERT_MANAGER_VERSION=$(E2E_CERT_MANAGER_VERSION) $(ENVSUBST) < $(E2E_CONF_FILE) > $(E2E_CONF_FILE_ENVSUBST) && \
 	$(GINKGO) -v -trace -tags=e2e --junit-report=junit_cluster_api_operator_e2e.xml --output-dir="${JUNIT_REPORT_DIR}" --no-color=$(GINKGO_NOCOLOR) $(GINKGO_ARGS) ./test/e2e -- \
 		-e2e.artifacts-folder="$(ARTIFACTS)" \
-		-e2e.config="$(E2E_CONF_FILE_ENVSUBST)"  -e2e.components=$(ROOT)/$(RELEASE_DIR)/operator-components.yaml \
-		-e2e.skip-resource-cleanup=$(SKIP_CLEANUP) -e2e.use-existing-cluster=$(SKIP_CREATE_MGMT_CLUSTER) $(E2E_ARGS)
+		-e2e.config="$(E2E_CONF_FILE_ENVSUBST)"  -e2e.components=$(RELEASE_DIR)/operator-components.yaml \
+		-e2e.skip-resource-cleanup=$(SKIP_CLEANUP) -e2e.use-existing-cluster=$(SKIP_CREATE_MGMT_CLUSTER) \
+		-e2e.helm-binary-path=$(HELM) -e2e.chart-path=$(CHART_PACKAGE_DIR)/cluster-api-operator-$(HELM_CHART_TAG).tgz $(E2E_ARGS)

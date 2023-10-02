@@ -22,6 +22,7 @@ import (
 	_ "github.com/joelanford/go-apidiff"
 	_ "github.com/onsi/ginkgo/v2/ginkgo"
 	_ "gotest.tools/gotestsum"
+	_ "sigs.k8s.io/cluster-api/hack/tools/conversion-verifier"
 	_ "sigs.k8s.io/controller-runtime/tools/setup-envtest"
 	_ "sigs.k8s.io/controller-tools/cmd/controller-gen"
 )

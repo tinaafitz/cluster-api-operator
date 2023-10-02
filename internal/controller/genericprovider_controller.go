@@ -27,7 +27,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	kerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/client-go/rest"
-	operatorv1 "sigs.k8s.io/cluster-api-operator/api/v1alpha1"
+	operatorv1 "sigs.k8s.io/cluster-api-operator/api/v1alpha2"
 	"sigs.k8s.io/cluster-api-operator/internal/controller/genericprovider"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 	"sigs.k8s.io/cluster-api/util/conditions"
@@ -133,6 +133,12 @@ func (r *GenericProviderReconciler) Reconcile(ctx context.Context, req reconcile
 
 	// Set the spec hash annotation if reconciliation was successful or reset it otherwise.
 	if res.IsZero() && err == nil {
+		// Recalculate spec hash in case it was changed during reconciliation process.
+		specHash, err = calculateHash(typedProvider.GetSpec())
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+
 		annotations[appliedSpecHashAnnotation] = specHash
 	} else {
 		annotations[appliedSpecHashAnnotation] = ""
@@ -236,6 +242,8 @@ func (r *GenericProviderReconciler) newGenericProvider() (genericprovider.Generi
 		return &genericprovider.ControlPlaneProviderWrapper{ControlPlaneProvider: &operatorv1.ControlPlaneProvider{}}, nil
 	case *operatorv1.InfrastructureProvider:
 		return &genericprovider.InfrastructureProviderWrapper{InfrastructureProvider: &operatorv1.InfrastructureProvider{}}, nil
+	case *operatorv1.AddonProvider:
+		return &genericprovider.AddonProviderWrapper{AddonProvider: &operatorv1.AddonProvider{}}, nil
 	default:
 		providerKind := reflect.Indirect(reflect.ValueOf(r.Provider)).Type().Name()
 		failedToCastInterfaceErr := fmt.Errorf("failed to cast interface for type: %s", providerKind)
@@ -254,6 +262,8 @@ func (r *GenericProviderReconciler) newGenericProviderList() (genericprovider.Ge
 		return &genericprovider.ControlPlaneProviderListWrapper{ControlPlaneProviderList: &operatorv1.ControlPlaneProviderList{}}, nil
 	case *operatorv1.InfrastructureProviderList:
 		return &genericprovider.InfrastructureProviderListWrapper{InfrastructureProviderList: &operatorv1.InfrastructureProviderList{}}, nil
+	case *operatorv1.AddonProviderList:
+		return &genericprovider.AddonProviderListWrapper{AddonProviderList: &operatorv1.AddonProviderList{}}, nil
 	default:
 		providerKind := reflect.Indirect(reflect.ValueOf(r.ProviderList)).Type().Name()
 		failedToCastInterfaceErr := fmt.Errorf("failed to cast interface for type: %s", providerKind)

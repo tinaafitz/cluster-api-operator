@@ -26,6 +26,7 @@
   * [Modifying a Provider](#modifying-a-provider)
   * [Deleting a Provider](#deleting-a-provider)
 - [Air-gapped Environment](#air-gapped-environment)
+- [Injecting additional manifests](#injecting-additional-manifests)
 
 # Introduction
 
@@ -56,7 +57,9 @@ The lexicon used in this document is described in more detail [here](https://git
 
 ## Installation
 
-Before installing the Cluster API Operator, you must first ensure that cert-manager is installed, as the operator does not manage cert-manager installations. To install cert-manager, run the following command:
+### Method 1: Apply Manifests from Release Assets
+
+Before installing the Cluster API Operator this way, you must first ensure that cert-manager is installed, as the operator does not manage cert-manager installations. To install cert-manager, run the following command:
 
 ```bash
 kubectl apply -f https://github.com/jetstack/cert-manager/releases/latest/download/cert-manager.yaml
@@ -64,11 +67,7 @@ kubectl apply -f https://github.com/jetstack/cert-manager/releases/latest/downlo
 
 Wait for cert-manager to be ready before proceeding.
 
-After cert-manager is successfully installed, you can install the Cluster API operator using one of the following methods:
-
-### Method 1: Apply Manifests from Release Assets
-
-Install the Cluster API operator directly by applying the latest release assets:
+After cert-manager is successfully installed, you can install the Cluster API operator directly by applying the latest release assets:
 
 ```bash
 kubectl apply -f https://github.com/kubernetes-sigs/cluster-api-operator/releases/latest/download/operator-components.yaml
@@ -84,7 +83,43 @@ helm repo update
 helm install capi-operator capi-operator/cluster-api-operator --create-namespace -n capi-operator-system
 ```
 
-⚠️ **Note:** Make sure to review and adjust the RBAC permissions as needed. The operator will create and update CRDs, so appropriate permissions should be granted. We are continuously working to determine the best way to handle this.
+#### Installing cert-manager using Helm chart
+
+CAPI operator Helm chart supports provisioning of cert-manager as a dependency. It is disabled by default, but you can enable it with `--set cert-manager.enabled=true` option to `helm install` command or inside of `cert-manager` section in [values.yaml](https://github.com/kubernetes-sigs/cluster-api-operator/blob/main/hack/charts/cluster-api-operator/values.yaml) file. Additionally you can define other [parameters](https://artifacthub.io/packages/helm/cert-manager/cert-manager#configuration) provided by the cert-manager chart.
+
+#### Installing providers using Helm chart
+
+The operator Helm chart supports a "quickstart" option for bootstrapping a management cluster. The user experience is relatively similar to [clusterctl init](https://cluster-api.sigs.k8s.io/clusterctl/commands/init.html?highlight=init#clusterctl-init):
+
+```bash
+helm install capi-operator capi-operator/cluster-api-operator --create-namespace -n capi-operator-system --set infrastructure=docker:v1.4.2  --wait --timeout 90s # core Cluster API with kubeadm bootstrap and control plane providers will also be installed
+```
+
+```bash
+helm install capi-operator capi-operator/cluster-api-operator --create-namespace -n capi-operator-system —set infrastructure="docker;azure"  --wait --timeout 90s # core Cluster API with kubeadm bootstrap and control plane providers will also be installed
+```
+
+```bash
+helm install capi-operator capi-operator/cluster-api-operator --create-namespace -n capi-operator-system —set infrastructure="capd-custom-ns:docker:v1.4.2;capz-custom-ns:azure:v1.10.0"  --wait --timeout 90s # core Cluster API with kubeadm bootstrap and control plane providers will also be installed
+```
+
+```bash
+helm install capi-operator capi-operator/cluster-api-operator --create-namespace -n capi-operator-system --set core=cluster-api:v1.4.2 --set controlPlane=kubeadm:v1.4.2 --set bootstrap=kubeadm:v1.4.2  --set infrastructure=docker:v1.4.2  --wait --timeout 90s
+```
+
+For more complex operations, please refer to our API documentation.
+
+#### Configuring operator deployment using Helm
+
+The operator Helm chart provides multiple ways to configure deployment. For instance, you can update images and image pull secrets for containers, which is important for air-gapped environments. Also you can add labels and annotations, modify resource requests and limits, and so on. For full list of available options take a look at [values.yaml](https://github.com/kubernetes-sigs/cluster-api-operator/blob/main/hack/charts/cluster-api-operator/values.yaml) file.
+
+#### Helm installation example
+
+The following command will install cert-manager, CAPI operator itself with modified log level, Core CAPI provider with kubeadm bootstrap and control plane, and Docker infrastructure.
+
+```bash
+helm install capi-operator capi-operator/cluster-api-operator --create-namespace -n capi-operator-system --set infrastructure=docker:v1.5.0  --set cert-manager.enabled=true --set logLevel=4 --wait --timeout 90s
+```
 
 ## Configuration
 
@@ -130,12 +165,13 @@ docker run -it --rm registry.k8s.io/capi-operator/cluster-api-operator:${CAPI_OP
 
 ## Basic Cluster API Provider Installation
 
-In this section, we will walk you through the basic process of installing Cluster API providers using the operator. The Cluster API operator manages four types of objects:
+In this section, we will walk you through the basic process of installing Cluster API providers using the operator. The Cluster API operator manages five types of objects:
 
 - CoreProvider
 - BootstrapProvider
 - ControlPlaneProvider
 - InfrastructureProvider
+- AddonProvider
 
 Please note that this example provides a basic configuration of Azure Infrastructure provider for getting started. More detailed examples and CRD descriptions will be provided in subsequent sections of this document.
 
@@ -148,7 +184,7 @@ You can utilize any existing namespace for providers in your Kubernetes operator
 *Example:*
 
 ```yaml
-apiVersion: operator.cluster.x-k8s.io/v1alpha1
+apiVersion: operator.cluster.x-k8s.io/v1alpha2
 kind: CoreProvider
 metadata:
   name: cluster-api
@@ -187,7 +223,8 @@ metadata:
  namespace: capz-system
 spec:
  version: v1.9.3
- secretName: azure-variables
+ configSecret:
+   name: azure-variables
 ```
 
 ### Deleting providers
@@ -265,8 +302,7 @@ The following sections provide details about `ProviderSpec` and `ProviderStatus`
    - Version (string): provider version (e.g., "v0.1.0")
    - Manager (optional ManagerSpec): controller manager properties for the provider
    - Deployment (optional DeploymentSpec): deployment properties for the provider
-   - SecretName (optional string): name of the secret that contains provider credentials
-   - SecretNamespace (optional string): namespace of the secret that contains provider credentials
+   - ConfigSecret (optional SecretReference): reference to the config secret
    - FetchConfig (optional FetchConfiguration): how the operator will fetch components and metadata
 
    YAML example:
@@ -278,7 +314,8 @@ The following sections provide details about `ProviderSpec` and `ProviderStatus`
       maxConcurrentReconciles: 5
     deployment:
       replicas: 1
-    secretName: "provider-secret"
+    configSecret:
+      name: "provider-secret"
     fetchConfig:
       url: "https://github.com/owner/repo/releases"
    ...
@@ -336,10 +373,7 @@ The following sections provide details about `ProviderSpec` and `ProviderStatus`
                  - "true"
        containers:
          - name: "containerA"
-           image:
-             repository: "example.com/repo"
-             name: "image-name"
-             tag: "v1.0.0"
+           imageURL: "example.com/repo/image-name:v1.0.0"
            args:
              exampleArg: "value"
     ...
@@ -347,7 +381,7 @@ The following sections provide details about `ProviderSpec` and `ProviderStatus`
 
 4. `ContainerSpec`: container properties for the provider, consisting of:
    - Name (string): container name
-   - Image (optional ImageMeta): container image metadata
+   - ImageURL (optional string): container image URL
    - Args (optional map[string]string): extra provider specific flags
    - Env (optional []corev1.EnvVar): environment variables
    - Resources (optional corev1.ResourceRequirements): compute resources
@@ -360,10 +394,7 @@ The following sections provide details about `ProviderSpec` and `ProviderStatus`
      deployment:
        containers:
          - name: "example-container"
-           image:
-             repository: "example.com/repo"
-             name: "image-name"
-             tag: "v1.0.0"
+           imageURL: "example.com/repo/image-name:v1.0.0"
            args:
              exampleArg: "value"
            env:
@@ -381,12 +412,7 @@ The following sections provide details about `ProviderSpec` and `ProviderStatus`
    ...
    ```
 
-5. `ImageMeta`: container image customization, consisting of:
-   - Repository (optional string): image registry (e.g., "example.com/repo")
-   - Name (optional string): image name (e.g., "provider-image")
-   - Tag (optional string): image tag (e.g., "v1.0.0")
-
-6. `FetchConfiguration`: components and metadata fetch options, consisting of:
+5. `FetchConfiguration`: components and metadata fetch options, consisting of:
    - URL (optional string): URL for remote Github repository releases (e.g., "https://github.com/owner/repo/releases")
    - Selector (optional metav1.LabelSelector): label selector to use for fetching provider components and metadata from ConfigMaps stored in the cluster
 
@@ -400,6 +426,21 @@ The following sections provide details about `ProviderSpec` and `ProviderStatus`
          matchLabels:
    ...
    ```
+
+6. `SecretReference`: pointer to a secret object, consisting of:
+  - Name (string): name of the secret
+  - Namespace (optional string): namespace of the secret, defaults to the provider object namespace
+   
+  YAML example:
+  ```yaml
+  ...
+  spec:
+    configSecret:
+      name: capa-secret
+      namespace: capa-system
+  ...
+  ```
+
 ## Provider Status
 
 `ProviderStatus`: observed state of the Provider, consisting of:
@@ -437,14 +478,15 @@ type: Opaque
 data:
  AWS_B64ENCODED_CREDENTIALS: ...
 ---
-apiVersion: operator.cluster.x-k8s.io/v1alpha1
+apiVersion: operator.cluster.x-k8s.io/v1alpha2
 kind: InfrastructureProvider
 metadata:
  name: aws
  namespace: capa-system
 spec:
  version: v2.1.4
- secretName: aws-variables
+ configSecret:
+   name: aws-variables
  manager:
    # These top level controller manager flags, supported by all the providers.
    # These flags come with sensible defaults, thus requiring no or minimal
@@ -468,35 +510,34 @@ spec:
 
 ```yaml
 ---
-apiVersion: operator.cluster.x-k8s.io/v1alpha1
+apiVersion: operator.cluster.x-k8s.io/v1alpha2
 kind: InfrastructureProvider
 metadata:
  name: aws
  namespace: capa-system
 spec:
  version: v2.1.4
- secretName: aws-variables
+ configSecret:
+   name: aws-variables
  deployment:
    containers:
    - name: manager
-     image:
-       repository: "gcr.io/myregistry"
-       name: "capa-controller"
-       tag: "v2.1.4-foo"
+     imageURL: "gcr.io/myregistry/capa-controller:v2.1.4-foo"
 ```
 
 3. As an admin, I want to change the resource limits for the manager pod in my control plane provider deployment.
 
 ```yaml
 ---
-apiVersion: operator.cluster.x-k8s.io/v1alpha1
+apiVersion: operator.cluster.x-k8s.io/v1alpha2
 kind: ControlPlaneProvider
 metadata:
  name: kubeadm
  namespace: capi-kubeadm-control-plane-system
 spec:
  version: v1.4.3
- secretName: capi-variables
+ configSecret: 
+   name: capi-variables
  deployment:
    containers:
    - name: manager
@@ -513,14 +554,15 @@ spec:
 
 ```yaml
 ---
-apiVersion: operator.cluster.x-k8s.io/v1alpha1
+apiVersion: operator.cluster.x-k8s.io/v1alpha2
 kind: InfrastructureProvider
 metadata:
  name: myazure
  namespace: capz-system
 spec:
  version: v1.9.3
- secretName: azure-variables
+ configSecret:
+   name: azure-variables
  fetchConfig:
    url: https://github.com/myorg/awesome-azure-provider/releases
 
@@ -532,14 +574,15 @@ See more examples in the [air-gapped environment section](#air-gapped-environmen
 
 ```yaml
 ---
-apiVersion: operator.cluster.x-k8s.io/v1alpha1
+apiVersion: operator.cluster.x-k8s.io/v1alpha2
 kind: InfrastructureProvider
 metadata:
  name: vsphere
  namespace: capv-system
 spec:
  version: v1.6.1
- secretName: vsphere-variables
+ configSecret:
+   name: vsphere-variables
 ```
 
 # Cluster API Provider Lifecycle
@@ -632,15 +675,82 @@ data:
   metadata: |
     # Metadata information goes here
 ---
-apiVersion: operator.cluster.x-k8s.io/v1alpha1
+apiVersion: operator.cluster.x-k8s.io/v1alpha2
 kind: InfrastructureProvider
 metadata:
   name: azure
   namespace: capz-system
 spec:
   version: v1.9.3
-  secretName: azure-variables
+  configSecret:
+    name: azure-variables
   fetchConfig:
     selector:
       matchLabels:
         provider-components: azure
+```
+
+### Situation when manifests do not fit into configmap
+
+There is a limit on the [maximum size](https://kubernetes.io/docs/concepts/configuration/configmap/#motivation) of a configmap - 1MiB. If the manifests do not fit into this size, Kubernetes will generate an error and provider installation fail. To avoid this, you can archive the manifests and put them in the configmap that way.
+
+For example, you have two files: `components.yaml` and `metadata.yaml`. To create a working config map you need:
+
+1. Archive components.yaml using `gzip` cli tool
+
+```sh
+gzip -c components.yaml > components.gz
+```
+
+2. Create a configmap manifest from the archived data
+
+```sh
+kubectl create configmap v1.9.3 --namespace=capz-system --from-file=components=components.gz --from-file=metadata=metadata.yaml --dry-run=client -o yaml > configmap.yaml
+```
+
+3. Edit the file by adding "provider.cluster.x-k8s.io/compressed: true" annotation
+
+```sh
+yq eval -i '.metadata.annotations += {"provider.cluster.x-k8s.io/compressed": "true"}' configmap.yaml
+```
+
+**Note**: without this annotation operator won't be able to determine if the data is compressed or not.
+
+4. Add labels that will be used to match the configmap in `fetchConfig` section of the provider
+
+```sh
+yq eval -i '.metadata.labels += {"my-label": "label-value"}' configmap.yaml
+```
+
+5. Create a configmap in your kubernetes cluster using kubectl
+
+```sh
+kubectl create -f configmap.yaml
+```
+
+## Injecting additional manifests
+
+It is possible to inject additional manifests when installing/upgrading a provider. This can be useful when you need to add extra RBAC resources to the provider controller, for example.
+The field `AdditionalManifests` is a reference to a ConfigMap that contains additional manifests, which will be applied together with the provider components. The key for storing these manifests has to be `manifests`.
+The manifests are applied only once when a certain release is installed/upgraded. If the namespace is not specified, the namespace of the provider will be used. There is no validation of the YAML content inside the ConfigMap.
+
+```yaml
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: additional-manifests
+  namespace: capi-system
+data:
+  manifests: |
+    # Additional manifests go here
+---
+apiVersion: operator.cluster.x-k8s.io/v1alpha2
+kind: CoreProvider
+metadata:
+  name: cluster-api
+  namespace: capi-system
+spec:
+  additionalManifests:
+    name: additional-manifests
+```
