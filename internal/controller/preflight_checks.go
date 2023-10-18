@@ -25,7 +25,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/version"
-	operatorv1 "sigs.k8s.io/cluster-api-operator/api/v1alpha1"
+	operatorv1 "sigs.k8s.io/cluster-api-operator/api/v1alpha2"
 	"sigs.k8s.io/cluster-api-operator/internal/controller/genericprovider"
 	"sigs.k8s.io/cluster-api-operator/util"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
@@ -46,7 +46,7 @@ var (
 	capiVersionIncompatibilityMessage            = "CAPI operator is only compatible with %s providers, detected %s for provider %s."
 	invalidGithubTokenMessage                    = "Invalid github token, please check your github token value and its permissions" //nolint:gosec
 	waitingForCoreProviderReadyMessage           = "Waiting for the core provider to be installed."
-	emptyVersionMessage                          = "Version cannot be empty"
+	incorrectCoreProviderNameMessage             = "Incorrect CoreProvider name: %s. It should be %s"
 )
 
 // preflightChecks performs preflight checks before installing provider.
@@ -57,30 +57,33 @@ func preflightChecks(ctx context.Context, c client.Client, provider genericprovi
 
 	spec := provider.GetSpec()
 
-	// Check that provider version is not empty.
-	if spec.Version == "" {
-		log.Info("Version can't be empty")
-		conditions.Set(provider, conditions.FalseCondition(
-			operatorv1.PreflightCheckCondition,
-			operatorv1.EmptyVersionReason,
-			clusterv1.ConditionSeverityError,
-			emptyVersionMessage,
-		))
+	// Check that provider version contains a valid value if it's not empty.
+	if spec.Version != "" {
+		if _, err := version.ParseSemantic(spec.Version); err != nil {
+			log.Info("Version contains invalid value")
+			conditions.Set(provider, conditions.FalseCondition(
+				operatorv1.PreflightCheckCondition,
+				operatorv1.IncorrectVersionFormatReason,
+				clusterv1.ConditionSeverityError,
+				err.Error(),
+			))
 
-		return ctrl.Result{}, fmt.Errorf("version can't be empty for provider %s", provider.GetName())
+			return ctrl.Result{}, fmt.Errorf("version contains invalid value for provider %q", provider.GetName())
+		}
 	}
 
-	// Check that provider version contains a valid value.
-	if _, err := version.ParseSemantic(spec.Version); err != nil {
-		log.Info("Version contains invalid value")
-		conditions.Set(provider, conditions.FalseCondition(
-			operatorv1.PreflightCheckCondition,
-			operatorv1.IncorrectVersionFormatReason,
-			clusterv1.ConditionSeverityError,
-			err.Error(),
-		))
+	// Ensure that the CoreProvider is called "cluster-api".
+	if util.IsCoreProvider(provider) {
+		if provider.GetName() != configclient.ClusterAPIProviderName {
+			conditions.Set(provider, conditions.FalseCondition(
+				operatorv1.PreflightCheckCondition,
+				operatorv1.IncorrectCoreProviderNameReason,
+				clusterv1.ConditionSeverityError,
+				fmt.Sprintf(incorrectCoreProviderNameMessage, provider.GetName(), configclient.ClusterAPIProviderName),
+			))
 
-		return ctrl.Result{}, fmt.Errorf("version contains invalid value for provider %s", provider.GetName())
+			return ctrl.Result{}, fmt.Errorf("incorrect CoreProvider name: %s, it should be %s", provider.GetName(), configclient.ClusterAPIProviderName)
+		}
 	}
 
 	// Check that if a predefined provider is being installed, and if it's not - ensure that FetchConfig is specified.
@@ -115,9 +118,9 @@ func preflightChecks(ctx context.Context, c client.Client, provider genericprovi
 	}
 
 	// Validate that provided github token works and has repository access.
-	if spec.SecretName != "" {
+	if spec.ConfigSecret != nil {
 		secret := &corev1.Secret{}
-		key := types.NamespacedName{Namespace: provider.GetSpec().SecretNamespace, Name: provider.GetSpec().SecretName}
+		key := types.NamespacedName{Namespace: provider.GetSpec().ConfigSecret.Namespace, Name: provider.GetSpec().ConfigSecret.Name}
 
 		if err := c.Get(ctx, key, secret); err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to get providers secret: %w", err)

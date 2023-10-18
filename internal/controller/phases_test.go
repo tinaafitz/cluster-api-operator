@@ -28,7 +28,7 @@ import (
 	"sigs.k8s.io/cluster-api/cmd/clusterctl/client/repository"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	operatorv1 "sigs.k8s.io/cluster-api-operator/api/v1alpha1"
+	operatorv1 "sigs.k8s.io/cluster-api-operator/api/v1alpha2"
 	"sigs.k8s.io/cluster-api-operator/internal/controller/genericprovider"
 )
 
@@ -55,8 +55,10 @@ func TestSecretReader(t *testing.T) {
 				},
 				Spec: operatorv1.CoreProviderSpec{
 					ProviderSpec: operatorv1.ProviderSpec{
-						SecretName:      secretName,
-						SecretNamespace: secretNamespace,
+						ConfigSecret: &operatorv1.SecretReference{
+							Name:      secretName,
+							Namespace: secretNamespace,
+						},
 						FetchConfig: &operatorv1.FetchConfiguration{
 							URL: "https://example.com",
 						},
@@ -131,7 +133,7 @@ releaseSeries:
 	contract: v1alpha3`
 
 	components := `
-	apiVersion: v1
+apiVersion: v1
 kind: Namespace
 metadata:
   labels:
@@ -147,12 +149,21 @@ metadata:
     control-plane: controller-manager
   name: capi-webhook-system
 ---`
+
+	additionalManifests := `
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: some-other-namespace
+---
+`
 	tests := []struct {
-		name               string
-		configMaps         []corev1.ConfigMap
-		want               repository.Repository
-		wantErr            string
-		wantDefaultVersion string
+		name                string
+		configMaps          []corev1.ConfigMap
+		additionalManifests string
+		want                repository.Repository
+		wantErr             string
+		wantDefaultVersion  string
 	}{
 		{
 			name:    "missing configmaps",
@@ -194,7 +205,7 @@ metadata:
 					},
 				},
 			},
-			wantErr: "ConfigMap ns1/v1.2.3 has no components",
+			wantErr: "ConfigMap ns1/v1.2.3 Data has no components",
 		},
 		{
 			name: "configmap with invalid version in the name",
@@ -335,6 +346,28 @@ metadata:
 			},
 			wantDefaultVersion: "v1.2.3",
 		},
+		{
+			name: "with additional manifests",
+			configMaps: []corev1.ConfigMap{
+				{
+					TypeMeta: metav1.TypeMeta{
+						Kind:       "ConfigMap",
+						APIVersion: "v1",
+					},
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "v1.2.3",
+						Namespace: "ns1",
+						Labels:    map[string]string{"provider-components": "aws"},
+					},
+					Data: map[string]string{
+						"metadata":   metadata,
+						"components": components,
+					},
+				},
+			},
+			additionalManifests: additionalManifests,
+			wantDefaultVersion:  "v1.2.3",
+		},
 	}
 
 	for _, tt := range tests {
@@ -351,14 +384,25 @@ metadata:
 				g.Expect(fakeclient.Create(ctx, &tt.configMaps[i])).To(Succeed())
 			}
 
-			got, err := p.configmapRepository(context.TODO(), p.provider.GetSpec().FetchConfig.Selector)
+			got, err := p.configmapRepository(context.TODO(), p.provider.GetSpec().FetchConfig.Selector, tt.additionalManifests)
 			if len(tt.wantErr) > 0 {
 				g.Expect(err).Should(MatchError(tt.wantErr))
 				return
 			}
 			g.Expect(err).To(Succeed())
-			g.Expect(got.GetFile(got.DefaultVersion(), got.ComponentsPath())).To(Equal([]byte(components)))
-			g.Expect(got.GetFile(got.DefaultVersion(), "metadata.yaml")).To(Equal([]byte(metadata)))
+			gotComponents, err := got.GetFile(got.DefaultVersion(), got.ComponentsPath())
+			g.Expect(err).To(Succeed())
+
+			if tt.additionalManifests != "" {
+				g.Expect(string(gotComponents)).To(Equal(components + "\n---\n" + additionalManifests))
+			} else {
+				g.Expect(string(gotComponents)).To(Equal(components))
+			}
+
+			gotMetadata, err := got.GetFile(got.DefaultVersion(), "metadata.yaml")
+			g.Expect(err).To(Succeed())
+			g.Expect(string(gotMetadata)).To(Equal(metadata))
+
 			g.Expect(got.DefaultVersion()).To(Equal(tt.wantDefaultVersion))
 		})
 	}
@@ -438,6 +482,57 @@ func TestRepositoryFactory(t *testing.T) {
 			}
 
 			g.Expect(repo.GetVersions()).To(ContainElement("v1.4.1"))
+		})
+	}
+}
+
+func TestGetLatestVersion(t *testing.T) {
+	testCases := []struct {
+		name        string
+		versions    []string
+		expected    string
+		expectError bool
+	}{
+		{
+			name:        "Test empty input",
+			versions:    []string{},
+			expected:    "",
+			expectError: true,
+		},
+		{
+			name:        "Test single version",
+			versions:    []string{"v1.0.0"},
+			expected:    "v1.0.0",
+			expectError: false,
+		},
+		{
+			name:        "Test multiple versions",
+			versions:    []string{"v1.0.0", "v2.0.0", "v1.5.0"},
+			expected:    "v2.0.0",
+			expectError: false,
+		},
+		{
+			name:        "Test incorrect versions",
+			versions:    []string{"v1.0.0", "NOT_A_VERSION", "v1.5.0"},
+			expected:    "",
+			expectError: true,
+		},
+	}
+
+	g := NewWithT(t)
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := getLatestVersion(tc.versions)
+
+			if tc.expectError {
+				g.Expect(err).To(HaveOccurred())
+
+				return
+			}
+
+			g.Expect(got).To(Equal(tc.expected))
+			g.Expect(err).ToNot(HaveOccurred())
 		})
 	}
 }

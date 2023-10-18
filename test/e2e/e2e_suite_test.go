@@ -22,33 +22,33 @@ package e2e
 import (
 	"flag"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	"k8s.io/apimachinery/pkg/runtime"
-	operatorv1 "sigs.k8s.io/cluster-api-operator/api/v1alpha1"
+	"k8s.io/klog/v2"
+	operatorv1alpha1 "sigs.k8s.io/cluster-api-operator/api/v1alpha1"
+	operatorv1 "sigs.k8s.io/cluster-api-operator/api/v1alpha2"
+
+	. "sigs.k8s.io/cluster-api-operator/test/framework"
 	"sigs.k8s.io/cluster-api/test/framework"
 	"sigs.k8s.io/cluster-api/test/framework/bootstrap"
 	"sigs.k8s.io/cluster-api/test/framework/clusterctl"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/yaml"
 )
 
 const (
-	certManagerURL                  = "CERTMANAGER_URL"
-	certManagerNamespace            = "cert-manager"
-	certManagerDeployment           = "cert-manager"
-	certManagerCAInjectorDeployment = "cert-manager-cainjector"
-	certManagerWebhookDeployment    = "cert-manager-webhook"
-	capiOperatorManagerDeployment   = "capi-operator-controller-manager"
+	certManagerVersion            = "CERTMANAGER_VERSION"
+	certManagerNamespace          = "cert-manager"
+	capiOperatorManagerDeployment = "capi-operator-controller-manager"
 )
 
 // Test suite flags.
@@ -67,6 +67,12 @@ var (
 
 	// componentsPath is the path to the operator components file.
 	componentsPath string
+
+	// helmBinaryPath is the path to the helm binary.
+	helmBinaryPath string
+
+	// chartPath is the path to the operator chart.
+	chartPath string
 )
 
 // Test suite global vars.
@@ -85,6 +91,13 @@ var (
 	// bootstrapClusterProxy allows to interact with the bootstrap cluster to be used for the e2e tests.
 	bootstrapClusterProxy framework.ClusterProxy
 
+	// helmClusterProvider manages provisioning of the bootstrap cluster to be used for the helm tests.
+	// Please note that provisioning will be skipped if e2e.use-existing-cluster is provided.
+	helmClusterProvider bootstrap.ClusterProvider
+
+	// bootstrapClusterProxy allows to interact with the bootstrap cluster to be used for the helm tests.
+	helmClusterProxy framework.ClusterProxy
+
 	// kubetestConfigFilePath is the path to the kubetest configuration file.
 	kubetestConfigFilePath string
 
@@ -96,6 +109,9 @@ var (
 
 	// usePRArtifacts specifies whether or not to use the build from a PR of the Kubernetes repository.
 	usePRArtifacts bool
+
+	// helmChart is the helm chart helper to be used for the e2e tests.
+	helmChart *HelmChart
 )
 
 func init() {
@@ -108,10 +124,15 @@ func init() {
 	flag.BoolVar(&useExistingCluster, "e2e.use-existing-cluster", false, "if true, the test uses the current cluster instead of creating a new one (default discovery rules apply)")
 	flag.StringVar(&kubetestConfigFilePath, "kubetest.config-file", "", "path to the kubetest configuration file")
 	flag.StringVar(&kubetestRepoListPath, "kubetest.repo-list-path", "", "path to the kubetest repo-list path")
+	flag.StringVar(&helmBinaryPath, "e2e.helm-binary-path", "", "path to the helm binary")
+	flag.StringVar(&chartPath, "e2e.chart-path", "", "path to the operator chart")
 }
 
 func TestE2E(t *testing.T) {
 	RegisterFailHandler(Fail)
+
+	ctrl.SetLogger(klog.Background())
+
 	RunSpecs(t, "capi-operator-e2e")
 }
 
@@ -123,6 +144,8 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 	Expect(componentsPath).To(BeAnExistingFile(), "Invalid test suite argument. e2e.components should be an existing file.")
 	Expect(configPath).To(BeAnExistingFile(), "Invalid test suite argument. e2e.config should be an existing file.")
 	Expect(os.MkdirAll(artifactFolder, 0755)).To(Succeed(), "Invalid test suite argument. Can't create e2e.artifacts-folder %q", artifactFolder)
+	Expect(helmBinaryPath).To(BeAnExistingFile(), "Invalid test suite argument. helm-binary-path should be an existing file.")
+	Expect(chartPath).To(BeAnExistingFile(), "Invalid test suite argument. chart-path should be an existing file.")
 
 	By("Initializing a runtime.Scheme with all the GVK relevant for this test")
 	scheme := initScheme()
@@ -134,10 +157,22 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 	clusterctlConfigPath = createClusterctlLocalRepository(e2eConfig, filepath.Join(artifactFolder, "repository"))
 
 	By("Setting up the bootstrap cluster")
-	bootstrapClusterProvider, bootstrapClusterProxy = setupBootstrapCluster(e2eConfig, scheme, useExistingCluster)
+	bootstrapClusterProvider, bootstrapClusterProxy = setupCluster(e2eConfig, scheme, useExistingCluster, "bootstrap")
 
 	By("Initializing the bootstrap cluster")
 	initBootstrapCluster(bootstrapClusterProxy, e2eConfig, clusterctlConfigPath, artifactFolder)
+
+	By("Setting up the helm test cluster")
+	helmClusterProvider, helmClusterProxy = setupCluster(&clusterctl.E2EConfig{
+		ManagementClusterName: "helm",
+		Images:                e2eConfig.Images,
+	}, scheme, useExistingCluster, "helm")
+
+	By("Initializing a helm chart helper")
+	initHelmChart()
+
+	By("Initializing the helm cluster")
+	initHelmCluster(helmClusterProxy, e2eConfig)
 
 	return []byte(
 		strings.Join([]string{
@@ -145,29 +180,34 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 			configPath,
 			clusterctlConfigPath,
 			bootstrapClusterProxy.GetKubeconfigPath(),
+			helmClusterProxy.GetKubeconfigPath(),
 		}, ","),
 	)
 }, func(data []byte) {
 	// Before each ParallelNode.
 
 	parts := strings.Split(string(data), ",")
-	Expect(parts).To(HaveLen(4))
+	Expect(parts).To(HaveLen(5))
 
 	artifactFolder = parts[0]
 	configPath = parts[1]
 	clusterctlConfigPath = parts[2]
-	kubeconfigPath := parts[3]
+	bootstrapKubeconfigPath := parts[3]
+	helmKubeconfigPath := parts[4]
 
 	e2eConfig = loadE2EConfig(configPath)
-	proxy := framework.NewClusterProxy("bootstrap", kubeconfigPath, initScheme())
+	bootstrapProxy := framework.NewClusterProxy("bootstrap", bootstrapKubeconfigPath, initScheme(), framework.WithMachineLogCollector(framework.DockerLogCollector{}))
+	helmProxy := framework.NewClusterProxy("helm", helmKubeconfigPath, initScheme(), framework.WithMachineLogCollector(framework.DockerLogCollector{}))
 
-	bootstrapClusterProxy = proxy
+	bootstrapClusterProxy = bootstrapProxy
+	helmClusterProxy = helmProxy
 })
 
 func initScheme() *runtime.Scheme {
 	scheme := runtime.NewScheme()
 	framework.TryAddDefaultSchemes(scheme)
 	Expect(operatorv1.AddToScheme(scheme)).To(Succeed())
+	Expect(operatorv1alpha1.AddToScheme(scheme)).To(Succeed())
 	return scheme
 }
 
@@ -197,7 +237,7 @@ func createClusterctlLocalRepository(config *clusterctl.E2EConfig, repositoryFol
 	return clusterctlConfig
 }
 
-func setupBootstrapCluster(config *clusterctl.E2EConfig, scheme *runtime.Scheme, useExistingCluster bool) (bootstrap.ClusterProvider, framework.ClusterProxy) {
+func setupCluster(config *clusterctl.E2EConfig, scheme *runtime.Scheme, useExistingCluster bool, clusterProxyName string) (bootstrap.ClusterProvider, framework.ClusterProxy) {
 	var clusterProvider bootstrap.ClusterProvider
 	kubeconfigPath := ""
 	if !useExistingCluster {
@@ -212,7 +252,7 @@ func setupBootstrapCluster(config *clusterctl.E2EConfig, scheme *runtime.Scheme,
 		Expect(kubeconfigPath).To(BeAnExistingFile(), "Failed to get the kubeconfig file for the bootstrap cluster")
 	}
 
-	proxy := framework.NewClusterProxy("bootstrap", kubeconfigPath, scheme)
+	proxy := framework.NewClusterProxy(clusterProxyName, kubeconfigPath, scheme, framework.WithMachineLogCollector(framework.DockerLogCollector{}))
 
 	return clusterProvider, proxy
 }
@@ -223,42 +263,7 @@ func initBootstrapCluster(bootstrapClusterProxy framework.ClusterProxy, config *
 	logFolder := filepath.Join(artifactFolder, "clusters", bootstrapClusterProxy.GetName())
 	Expect(os.MkdirAll(logFolder, 0750)).To(Succeed(), "Invalid argument. Log folder can't be created for initBootstrapCluster")
 
-	By("Deploying cert-manager")
-	Expect(config.Variables).To(HaveKey(certManagerURL), "Missing %s variable in the config", certManagerURL)
-	certManagerComponentsUrl := config.GetVariable(certManagerURL)
-
-	var netClient = &http.Client{
-		Timeout: time.Second * 10,
-	}
-
-	certManagerResponse, err := netClient.Get(certManagerComponentsUrl)
-	Expect(err).ToNot(HaveOccurred(), "Failed to download cert-manager components from %s", certManagerComponentsUrl)
-	defer certManagerResponse.Body.Close()
-
-	rawCertManagerResponse, err := io.ReadAll(certManagerResponse.Body)
-	Expect(err).ToNot(HaveOccurred(), "Failed to read the cert-manager components file")
-
-	Expect(bootstrapClusterProxy.Apply(ctx, rawCertManagerResponse)).To(Succeed(), "Failed to apply cert-manager components to the bootstrap cluster")
-
-	By("Waiting for cert manager to be available")
-	certManagerDeployments := []*appsv1.Deployment{
-		{
-			ObjectMeta: metav1.ObjectMeta{Name: certManagerDeployment, Namespace: certManagerNamespace},
-		},
-		{
-			ObjectMeta: metav1.ObjectMeta{Name: certManagerCAInjectorDeployment, Namespace: certManagerNamespace},
-		},
-		{
-			ObjectMeta: metav1.ObjectMeta{Name: certManagerWebhookDeployment, Namespace: certManagerNamespace},
-		},
-	}
-
-	for _, deployment := range certManagerDeployments {
-		framework.WaitForDeploymentsAvailable(ctx, framework.WaitForDeploymentsAvailableInput{
-			Getter:     bootstrapClusterProxy.GetClient(),
-			Deployment: deployment,
-		}, config.GetIntervals(bootstrapClusterProxy.GetName(), "wait-controllers")...)
-	}
+	ensureCertManager(bootstrapClusterProxy, config)
 
 	operatorComponents, err := os.ReadFile(componentsPath)
 	Expect(err).ToNot(HaveOccurred(), "Failed to read the operator components file")
@@ -267,7 +272,6 @@ func initBootstrapCluster(bootstrapClusterProxy framework.ClusterProxy, config *
 	Expect(bootstrapClusterProxy.Apply(ctx, operatorComponents)).To(Succeed(), "Failed to apply operator components to the bootstrap cluster")
 
 	By("Waiting for the controllers to be running")
-
 	framework.WaitForDeploymentsAvailable(ctx, framework.WaitForDeploymentsAvailableInput{
 		Getter:     bootstrapClusterProxy.GetClient(),
 		Deployment: &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: capiOperatorManagerDeployment, Namespace: operatorNamespace}},
@@ -285,6 +289,62 @@ func initBootstrapCluster(bootstrapClusterProxy framework.ClusterProxy, config *
 	}
 }
 
+func initHelmCluster(clusterProxy framework.ClusterProxy, config *clusterctl.E2EConfig) {
+	Expect(clusterProxy).ToNot(BeNil(), "Invalid argument. bootstrapClusterProxy can't be nil when calling initHelmCluster")
+	logFolder := filepath.Join(artifactFolder, "clusters", bootstrapClusterProxy.GetName())
+	Expect(os.MkdirAll(logFolder, 0750)).To(Succeed(), "Invalid argument. Log folder can't be created for initHelmCluster")
+	ensureCertManager(clusterProxy, config)
+}
+
+func ensureCertManager(clusterProxy framework.ClusterProxy, config *clusterctl.E2EConfig) {
+	By("Deploying cert-manager")
+	addCertChart := &HelmChart{
+		BinaryPath:      helmBinaryPath,
+		Name:            "jetstack",
+		Path:            "https://charts.jetstack.io/",
+		Kubeconfig:      clusterProxy.GetKubeconfigPath(),
+		Commands:        Commands(Repo, Add),
+		AdditionalFlags: Flags("--force-update"),
+	}
+	_, err := addCertChart.Run(nil)
+	Expect(err).ToNot(HaveOccurred())
+
+	repoUpdate := &HelmChart{
+		BinaryPath: helmBinaryPath,
+		Kubeconfig: clusterProxy.GetKubeconfigPath(),
+		Commands:   Commands(Repo, Update),
+	}
+	_, err = repoUpdate.Run(nil)
+	Expect(err).ToNot(HaveOccurred())
+
+	certChart := &HelmChart{
+		BinaryPath: helmBinaryPath,
+		Path:       "jetstack/cert-manager",
+		Name:       "cert-manager",
+		Kubeconfig: clusterProxy.GetKubeconfigPath(),
+		Wait:       true,
+		AdditionalFlags: Flags(
+			"--create-namespace",
+			"-n", certManagerNamespace,
+			"--version", config.GetVariable(certManagerVersion),
+		),
+	}
+	_, err = certChart.Run(map[string]string{
+		"installCRDs": "true",
+	})
+}
+
+func initHelmChart() {
+	helmChart = &HelmChart{
+		BinaryPath: helmBinaryPath,
+		Path:       chartPath,
+		Name:       "capi-operator",
+		Kubeconfig: helmClusterProxy.GetKubeconfigPath(),
+		DryRun:     true,
+		Output:     Hooks,
+	}
+}
+
 // Using a SynchronizedAfterSuite for controlling how to delete resources shared across ParallelNodes (~ginkgo threads).
 // The bootstrap cluster is shared across all the tests, so it should be deleted only after all ParallelNodes completes.
 var _ = SynchronizedAfterSuite(func() {
@@ -292,17 +352,18 @@ var _ = SynchronizedAfterSuite(func() {
 }, func() {
 	// After all ParallelNodes.
 
-	By("Tearing down the management cluster")
+	By("Tearing down the management clusters")
 	if !skipCleanup {
 		tearDown(bootstrapClusterProvider, bootstrapClusterProxy)
+		tearDown(helmClusterProvider, helmClusterProxy)
 	}
 })
 
-func tearDown(bootstrapClusterProvider bootstrap.ClusterProvider, bootstrapClusterProxy framework.ClusterProxy) {
-	if bootstrapClusterProxy != nil {
-		bootstrapClusterProxy.Dispose(ctx)
+func tearDown(clusterProvider bootstrap.ClusterProvider, clusterProxy framework.ClusterProxy) {
+	if clusterProxy != nil {
+		clusterProxy.Dispose(ctx)
 	}
-	if bootstrapClusterProvider != nil {
-		bootstrapClusterProvider.Dispose(ctx)
+	if clusterProvider != nil {
+		clusterProvider.Dispose(ctx)
 	}
 }

@@ -19,7 +19,6 @@ package main
 import (
 	"flag"
 	"fmt"
-	"math/rand"
 	"net/http"
 	"os"
 	"time"
@@ -41,7 +40,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 
-	operatorv1 "sigs.k8s.io/cluster-api-operator/api/v1alpha1"
+	operatorv1alpha1 "sigs.k8s.io/cluster-api-operator/api/v1alpha1"
+	operatorv1 "sigs.k8s.io/cluster-api-operator/api/v1alpha2"
 	providercontroller "sigs.k8s.io/cluster-api-operator/internal/controller"
 )
 
@@ -69,6 +69,7 @@ func init() {
 
 	// +kubebuilder:scaffold:scheme
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(operatorv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(operatorv1.AddToScheme(scheme))
 	utilruntime.Must(apiextensionsv1.AddToScheme(scheme))
 	utilruntime.Must(clusterctlv1.AddToScheme(scheme))
@@ -113,8 +114,6 @@ func InitFlags(fs *pflag.FlagSet) {
 }
 
 func main() {
-	rand.Seed(time.Now().UnixNano())
-
 	InitFlags(pflag.CommandLine)
 	pflag.CommandLine.AddGoFlagSet(flag.CommandLine)
 	pflag.Parse()
@@ -224,6 +223,16 @@ func setupReconcilers(mgr ctrl.Manager) {
 		setupLog.Error(err, "unable to create controller", "controller", "ControlPlaneProvider")
 		os.Exit(1)
 	}
+
+	if err := (&providercontroller.GenericProviderReconciler{
+		Provider:     &operatorv1.AddonProvider{},
+		ProviderList: &operatorv1.AddonProviderList{},
+		Client:       mgr.GetClient(),
+		Config:       mgr.GetConfig(),
+	}).SetupWithManager(mgr, concurrency(concurrencyNumber)); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "AddonProvider")
+		os.Exit(1)
+	}
 }
 
 func setupWebhooks(mgr ctrl.Manager) {
@@ -244,6 +253,11 @@ func setupWebhooks(mgr ctrl.Manager) {
 
 	if err := (&webhook.InfrastructureProviderWebhook{}).SetupWebhookWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create webhook", "webhook", "InfrastructureProvider")
+		os.Exit(1)
+	}
+
+	if err := (&webhook.AddonProviderWebhook{}).SetupWebhookWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create webhook", "webhook", "AddonProvider")
 		os.Exit(1)
 	}
 }

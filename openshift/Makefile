@@ -1,12 +1,11 @@
-TOOLS_DIR := ../hack/tools
-TOOLS_BIN_DIR := $(TOOLS_DIR)/bin
-KUSTOMIZE := $(abspath $(TOOLS_BIN_DIR)/kustomize)
+BIN_DIR := bin
+TOOLS_DIR := tools
 
-kustomize: $(KUSTOMIZE) ## Build a local copy of kustomize.
+KUSTOMIZE := tools/bin/kustomize
 
-$(KUSTOMIZE): # Build kustomize from tools folder.
-	../hack/ensure-kustomize.sh
+$(KUSTOMIZE):
+	./tools/ensure-kustomize.sh
 
 .PHONY: ocp-manifests
-ocp-manifests:  $(KUSTOMIZE)
+ocp-manifests: $(KUSTOMIZE) ## Builds openshift specific manifests
 	$(KUSTOMIZE) build ../config/default > operator-components.yaml
