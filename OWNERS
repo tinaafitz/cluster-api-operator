@@ -9,6 +9,8 @@ approvers:
 - jnpacker
 - serngawy
 - marek-veber
+- mzazrivec
+- PanSpagetka
 reviewers:
 - JoelSpeed
 - RadekManak
@@ -18,7 +20,9 @@ reviewers:
 - jnpacker
 - serngawy
 - marek-veber
+- mzazrivec
 - racheljpg
+- PanSpagetka
 - sub-mod
 - theobarberbany
 component: Cloud Compute
