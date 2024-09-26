@@ -26,6 +26,7 @@ CHART_VALUES_FILE := $(CHART_DIR)/values.yaml
 CHART_TEMPLATE_FILE := $(CHART_DIR)/templates/deployment.yaml
 OC_CHART_DIR := $(ROOT)/openshift/charts/cluster-api-operator
 OC_CHART_YAML := $(OC_CHART_DIR)/Chart.yaml
+OC_CHART_VALUES := $(OC_CHART_DIR)/values.yaml
 
 .PHONY: release-chart
 release-chart:
@@ -40,8 +41,9 @@ release-chart:
 	mkdir -p $(OC_CHART_DIR)
 	tar cf - -C $(CHART_DIR) --exclude templates/\* ./ | tar xf - -C $(OC_CHART_DIR)
 	tar cf - -C $(CHART_DIR) templates/deployment.yaml templates/operator-components.yaml templates/_helpers.tpl  | tar xf - -C $(OC_CHART_DIR)
-	$(YQ) eval '.version      = $(HELM_CHART_TAG)' $(OC_CHART_YAML) -i
+	$(YQ) eval '.version      = "$(HELM_CHART_TAG)"' $(OC_CHART_YAML) -i
 	$(YQ) eval '.appVersion = "$(HELM_CHART_TAG)"' $(OC_CHART_YAML) -i
+	$(YQ) eval '.awsEncodedCredentials = "ZmFrZQo="' $(OC_CHART_VALUES) -i # fake base64 string
 
 .PHONY: release-chart-package
 ifeq (,$(wildcard $(OC_CHART_YAML)))
