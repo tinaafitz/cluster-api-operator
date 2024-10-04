@@ -48,8 +48,9 @@ spec:
     {{- toYaml . | nindent 8 }}
     {{- end }}
     containers:
-      - imageUrl: registry.redhat.io/openshift4/ose-cluster-api-rhel9:{{ .Values.image.manager.tag }}
-        name: manager
+      - name: manager
+        imageUrl: registry.redhat.io/openshift4/ose-cluster-api-rhel9:{{ .Values.image.manager.tag }}
         command:
           - /bin/cluster-api-controller-manager
           
+

@@ -38,12 +38,12 @@ release-chart:
 	        PULL_POLICY=IfNotPresent \
 	        TARGET_RESOURCE="$(CHART_VALUES_FILE)"
 	sed -i -e 's;^\([[:space:]]*-[[:space:]]*\)/manager;\1/bin/cluster-api-operator;' $(CHART_TEMPLATE_FILE)
+	sed -i "2i # OCP CAPA param\nawsEncodedCredentials: QVdTX0I2NEVOQ09ERURfQ1JFREVOVElBTFM=\nocmUrl: ''\nocmToken: ''" $(CHART_VALUES_FILE)
 	mkdir -p $(OC_CHART_DIR)
 	tar cf - -C $(CHART_DIR) --exclude templates/\* ./ | tar xf - -C $(OC_CHART_DIR)
 	tar cf - -C $(CHART_DIR) templates/deployment.yaml templates/operator-components.yaml templates/_helpers.tpl  | tar xf - -C $(OC_CHART_DIR)
 	$(YQ) eval '.version      = "$(HELM_CHART_TAG)"' $(OC_CHART_YAML) -i
 	$(YQ) eval '.appVersion = "$(HELM_CHART_TAG)"' $(OC_CHART_YAML) -i
-	$(YQ) eval '.awsEncodedCredentials = "ZmFrZQo="' $(OC_CHART_VALUES) -i # fake base64 string
 
 .PHONY: release-chart-package
 ifeq (,$(wildcard $(OC_CHART_YAML)))
