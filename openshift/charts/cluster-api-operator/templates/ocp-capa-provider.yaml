@@ -36,6 +36,8 @@ kind: ClusterRoleBinding
 metadata:
   annotations:
     "argocd.argoproj.io/sync-wave": "1"
+    "helm.sh/hook": "post-install"
+    "helm.sh/hook-weight": "1"
   labels:
     cluster.x-k8s.io/provider: infrastructure-aws
     clusterctl.cluster.x-k8s.io: ""
